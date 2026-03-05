@@ -6,7 +6,7 @@ build
 .vscode
 real_robot
 pretrained_weights
-feature-splatting-inria
 dinov2_vits14
 part_level_features
 sam_clip_features
+scene_data
