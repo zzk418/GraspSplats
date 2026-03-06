@@ -6,19 +6,33 @@ import torch
 import copy
 from scipy.spatial.transform import Rotation
 
+def _clone_gaussians(gaussians):
+    """Create a shallow tensor-clone of a GaussianModel without deepcopy."""
+    from gaussian_renderer import GaussianModel
+    g = GaussianModel(gaussians.max_sh_degree, gaussians._distill_features.shape[1])
+    g._xyz              = gaussians._xyz.detach().clone()
+    g._features_dc      = gaussians._features_dc.detach().clone()
+    g._features_rest    = gaussians._features_rest.detach().clone()
+    g._opacity          = gaussians._opacity.detach().clone()
+    g._scaling          = gaussians._scaling.detach().clone()
+    g._rotation         = gaussians._rotation.detach().clone()
+    g._distill_features = gaussians._distill_features.detach().clone()
+    g.active_sh_degree  = gaussians.active_sh_degree
+    return g
+
 def select_gaussians(gaussians, selected_obj_idx):
-    gaussians_fg = copy.deepcopy(gaussians)
-    gaussians_fg._xyz = gaussians_fg._xyz[selected_obj_idx]
-    gaussians_fg._features_dc = gaussians_fg._features_dc[selected_obj_idx]
-    gaussians_fg._features_rest = gaussians_fg._features_rest[selected_obj_idx]
-    gaussians_fg._opacity = gaussians_fg._opacity[selected_obj_idx]
-    gaussians_fg._scaling = gaussians_fg._scaling[selected_obj_idx]
-    gaussians_fg._rotation = gaussians_fg._rotation[selected_obj_idx]
-    gaussians_fg._distill_features = gaussians_fg._distill_features[selected_obj_idx]
-    return gaussians_fg
+    g = _clone_gaussians(gaussians)
+    g._xyz              = g._xyz[selected_obj_idx]
+    g._features_dc      = g._features_dc[selected_obj_idx]
+    g._features_rest    = g._features_rest[selected_obj_idx]
+    g._opacity          = g._opacity[selected_obj_idx]
+    g._scaling          = g._scaling[selected_obj_idx]
+    g._rotation         = g._rotation[selected_obj_idx]
+    g._distill_features = g._distill_features[selected_obj_idx]
+    return g
 
 def combine_gaussians(gaussians_bg, gaussians_fg):
-    gaussians_combined = copy.deepcopy(gaussians_bg)
+    gaussians_combined = _clone_gaussians(gaussians_bg)
     gaussians_combined._xyz = torch.cat([gaussians_bg._xyz, gaussians_fg._xyz], dim=0)
     gaussians_combined._features_dc = torch.cat([gaussians_bg._features_dc, gaussians_fg._features_dc], dim=0)
     gaussians_combined._features_rest = torch.cat([gaussians_bg._features_rest, gaussians_fg._features_rest], dim=0)
@@ -29,13 +43,13 @@ def combine_gaussians(gaussians_bg, gaussians_fg):
     return gaussians_combined
 
 def translate_gaussians(gaussians, translation):
-    tmp_gaussians = copy.deepcopy(gaussians)
+    tmp_gaussians = _clone_gaussians(gaussians)
     translation = torch.tensor(translation, device='cuda').float()
     tmp_gaussians._xyz = tmp_gaussians._xyz + translation
     return tmp_gaussians
 
 def rotate_gaussians(gaussians, rot_mat):
-    tmp_gaussians = copy.deepcopy(gaussians)
+    tmp_gaussians = _clone_gaussians(gaussians)
     selected_pts = tmp_gaussians.get_xyz.cpu().numpy()
     selected_pts = rot_mat @ selected_pts.T
     selected_pts = selected_pts.T

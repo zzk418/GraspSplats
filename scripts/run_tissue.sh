@@ -26,7 +26,7 @@ WANDB_PROJECT=graspsplats WANDB_NAME=tissue \
 python feature-splatting-inria/train.py \
   -s scene_data/tissue_data \
   -m outputs/tissue_data \
-  --iterations 3000 \
+  --iterations 10000 \
   --feature_type "clip_part"
 
 # ---------- Step 4: launch grasping UI ----------
@@ -36,4 +36,4 @@ python scripts/compute_alignment.py \
     --target_pos 0.5 0.0 0.05 \
     --out outputs/tissue_data/world2base.npy
 
-python realbot_ui.py -m outputs/tissue_data
+python realbot_3dgs.py -m outputs/tissue_data
