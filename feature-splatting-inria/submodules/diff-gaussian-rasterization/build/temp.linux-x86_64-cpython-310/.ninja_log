@@ -1,0 +1,6 @@
+# ninja log v7
+0	5413	1772712420692041092	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o	66dff871218e4c42
+0	5670	1772712420692041092	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o	c757b68d65ee9fbe
+1	14862	1772712420693041119	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/ext.o	b3228f09e38ae8ce
+1	19210	1772712420693041119	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	c0f657af59e8cebe
+1	59236	1772712420693041119	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o	11069abbc7494e9f

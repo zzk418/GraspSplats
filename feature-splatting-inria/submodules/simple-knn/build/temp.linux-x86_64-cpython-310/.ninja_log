@@ -1,0 +1,7 @@
+# ninja log v7
+1	8455	1772712241460570166	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/simple_knn.o	6c164e753a506d27
+1	13296	1772712241460570166	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/ext.o	b9a812eb2feb4401
+1	35140	1772712241460570166	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/spatial.o	aa76618bfba6fe26
+9	7712	1772712542427061945	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/simple_knn.o	fc005322eedbae74
+9	12386	1772712542427061945	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/ext.o	65ca81cb89446c32
+9	35270	1772712542427061945	/home/kie/code/GraspSplats/feature-splatting-inria/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/spatial.o	ba9b003d3f7bfd7a

@@ -1,0 +1,41 @@
+ninja_required_version = 1.3
+cxx = c++
+nvcc = /usr/local/cuda-12.8/bin/nvcc
+
+cflags = -pthread -B /home/kie/miniconda3/envs/graspsplats/compiler_compat -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/kie/miniconda3/envs/graspsplats/include -fPIC -O2 -isystem /home/kie/miniconda3/envs/graspsplats/include -fPIC -I/home/kie/miniconda3/envs/graspsplats/lib/python3.10/site-packages/torch/include -I/home/kie/miniconda3/envs/graspsplats/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/usr/local/cuda-12.8/include -I/home/kie/miniconda3/envs/graspsplats/include/python3.10 -c
+post_cflags = -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_C -std=c++17
+cuda_cflags = -I/home/kie/miniconda3/envs/graspsplats/lib/python3.10/site-packages/torch/include -I/home/kie/miniconda3/envs/graspsplats/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/usr/local/cuda-12.8/include -I/home/kie/miniconda3/envs/graspsplats/include/python3.10 -c
+cuda_post_cflags = -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' '-Xptxas="-v"' -I/home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_C -gencode=arch=compute_70,code=sm_70 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -std=c++17
+cuda_dlink_post_cflags = 
+sycl_dlink_post_cflags = 
+ldflags = 
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+
+
+
+
+build /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o: cuda_compile /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/cuda_rasterizer/backward.cu
+build /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o: cuda_compile /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/cuda_rasterizer/forward.cu
+build /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o: cuda_compile /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu
+build /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/ext.o: compile /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/ext.cpp
+build /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o: cuda_compile /home/kie/code/GraspSplats/feature-splatting-inria/submodules/diff-gaussian-rasterization/rasterize_points.cu
+
+
+
+
+
+
+
+
