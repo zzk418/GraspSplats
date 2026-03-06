@@ -100,13 +100,12 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
         gaussians = GaussianModel(dataset.sh_degree, dataset.distill_feature_dim)
         gaussians.training_setup(opt)
 
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False) 
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
         pcd_gaussians = o3d.geometry.PointCloud()
         pcd_gaussians.points = o3d.utility.Vector3dVector(gaussians.get_xyz.cpu().numpy())
         pcd_gaussians.transform(world2base)
-        
-        # crop the gaussians with the table top with o3d
+
         bbox_min = np.array([x_min, y_min, z_min])
         bbox_max = np.array([x_max, y_max, z_max])
         bbox = o3d.geometry.AxisAlignedBoundingBox(min_bound=bbox_min, max_bound=bbox_max)
@@ -114,13 +113,12 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
 
         server.add_point_cloud(
             "pcd_gaussians",
-            points = np.asarray(pcd_gaussians.points),
-            # black color
-            colors = np.tile(np.array([0, 0, 0], dtype=np.float32), (len(pcd_gaussians.points), 1)),
-            point_size = 0.001,
-            position = (0, 0, 0),
+            points=np.asarray(pcd_gaussians.points),
+            colors=np.tile(np.array([0, 0, 0], dtype=np.float32), (len(pcd_gaussians.points), 1)),
+            point_size=0.001,
+            position=(0, 0, 0),
             visible=False
-        ) 
+        )
 
         my_feat_decoder = skip_feat_decoder(dataset.distill_feature_dim, part_level=True).cuda()
         decoder_weight_path = os.path.join(dataset.model_path, "feat_decoder.pth")
@@ -250,84 +248,182 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
         # query text
         gui_positive_object_query = server.add_gui_text(
             "Object Positive Query",
-            initial_value="screwdriver",
+            initial_value="",
         )
 
         gui_negative_object_query = server.add_gui_text(
             "Object Negative Query",
-            initial_value="pliers",
+            initial_value="table",
         )
 
         gui_part_query = server.add_gui_text(
             "Part Query",
-            initial_value="orange handle",
+            initial_value="",
         )
+
+        # auto pipeline button: segment foreground -> generate grasps -> select best grasp
+        segment_fg_button = server.add_gui_button("Auto Pipeline")
+
+        @segment_fg_button.on_click
+        def _(_) -> None:
+            import traceback
+            try:
+                with torch.no_grad():
+                    print("Auto Pipeline: segmenting foreground with generic object query")
+                    postive_obj_similarity = clip_segmeter.compute_similarity_one("object", level="object")
+                    selected_idx = postive_obj_similarity > obj_positive_similarity_slider.value
+
+                    selected_idx = edit_utils.cluster_instance(gaussians.get_xyz.cpu().numpy(), selected_idx, eps=0.015, min_samples=10)
+                    selected_idx_expanded = edit_utils.flood_fill(gaussians.get_xyz.cpu().numpy(), selected_idx, max_dist=0.1)
+
+                    nonlocal gaussians_fg, gaussians_fg_expanded, gaussians_bg, pcd_gaussians_selected
+                    nonlocal local_object_grasp_poses, local_object_grasp_poses_visual, local_object_grasp_scores
+
+                    # clear previous grasps
+                    for i in range(len(local_object_grasp_poses_visual)):
+                        server.add_frame(name=f'/grasps_{i}', wxyz=tf.SO3.from_matrix(local_object_grasp_poses_visual[i][:3, :3]).wxyz, position=local_object_grasp_poses_visual[i][:3, 3], show_axes=False, visible=False)
+                    local_object_grasp_poses = []
+                    local_object_grasp_poses_visual = []
+                    local_object_grasp_scores = []
+
+                    gaussians_fg = edit_utils.select_gaussians(gaussians, selected_idx)
+                    gaussians_fg_expanded = edit_utils.select_gaussians(gaussians, selected_idx_expanded)
+                    gaussians_bg = edit_utils.select_gaussians(gaussians, ~selected_idx)
+
+                    pcd_gaussians_selected = o3d.geometry.PointCloud()
+                    gaussians_fg_xyz = gaussians_fg.get_xyz.cpu().numpy()
+                    pcd_gaussians_selected.points = o3d.utility.Vector3dVector(gaussians_fg_xyz)
+                    pcd_gaussians_selected.transform(world2base)
+
+                    server.add_point_cloud(
+                        "pcd_fg_gaussians",
+                        points=np.asarray(pcd_gaussians_selected.points),
+                        colors=np.array([[255, 0, 0] for _ in range(gaussians_fg_xyz.shape[0])]),
+                        point_size=0.005,
+                        position=(0, 0, 0)
+                    )
+                    print(f"Foreground segmented: {gaussians_fg_xyz.shape[0]} gaussians")
+                _generate_object_grasps()
+                _select_best_grasp()
+            except Exception:
+                traceback.print_exc()
+
+        # save current results button
+        save_results_button = server.add_gui_button("Save Results")
+
+        @save_results_button.on_click
+        def _(_) -> None:
+            import traceback
+            try:
+                out_dir = os.path.join(dataset.model_path, "saved_results")
+                os.makedirs(out_dir, exist_ok=True)
+
+                # save best grasp pose
+                if len(local_object_grasp_poses) > 0:
+                    max_score = np.max(local_object_grasp_scores)
+                    grasp_number = local_object_grasp_scores.index(max_score)
+                    grasp = local_object_grasp_poses[grasp_number]
+                    np.save(os.path.join(out_dir, "best_grasp_pose.npy"), grasp)
+                    print(f"Saved grasp pose -> {out_dir}/best_grasp_pose.npy")
+                else:
+                    print("No grasp pose to save (run Auto Pipeline or Generate Object Grasps first)")
+
+                # save foreground point cloud (.ply)
+                if pcd_gaussians_selected is not None and len(pcd_gaussians_selected.points) > 0:
+                    pcd_path = os.path.join(out_dir, "foreground_pcd.ply")
+                    o3d.io.write_point_cloud(pcd_path, pcd_gaussians_selected)
+                    print(f"Saved foreground pcd -> {pcd_path}")
+                else:
+                    print("No foreground point cloud to save (run segmentation first)")
+
+                # save foreground gaussians (.ply)
+                if gaussians_fg is not None:
+                    fg_ply_path = os.path.join(out_dir, "foreground_gaussians.ply")
+                    gaussians_fg.save_ply(fg_ply_path)
+                    print(f"Saved foreground gaussians -> {fg_ply_path}")
+                else:
+                    print("No foreground gaussians to save (run segmentation first)")
+
+            except Exception:
+                traceback.print_exc()
 
         # query button
         query_button = server.add_gui_button("Query")
 
         @query_button.on_click
         def _(_) -> None:
-            positive_object_query = gui_positive_object_query.value
-            negative_object_query = gui_negative_object_query.value
-            part_query = gui_part_query.value
-            with torch.no_grad():
-                print("Positive Object Query:", positive_object_query)
-                postive_obj_similarity = clip_segmeter.compute_similarity_one(positive_object_query, level="object")
-                selected_idx = postive_obj_similarity > obj_positive_similarity_slider.value
-                print("selected_idx:", selected_idx.shape)
+            import traceback
+            try:
+                positive_object_query = gui_positive_object_query.value
+                negative_object_query = gui_negative_object_query.value
+                part_query = gui_part_query.value
+                with torch.no_grad():
+                    print("Positive Object Query:", positive_object_query)
+                    postive_obj_similarity = clip_segmeter.compute_similarity_one(positive_object_query, level="object")
+                    selected_idx = postive_obj_similarity > obj_positive_similarity_slider.value
+                    print("selected_idx:", selected_idx.shape)
 
-                if negative_object_query != "":
-                    print("Negative Object Query:", negative_object_query)
-                    # 1- similarity for non-similarity
-                    negative_object_query_similarity = clip_segmeter.compute_similarity_one(negative_object_query, level="object")
-                    dropped_idx = negative_object_query_similarity > obj_negative_similarity_slider.value
-                    print("dropped_idx:", dropped_idx.shape)
-                    selected_idx = selected_idx & ~dropped_idx
+                    if negative_object_query != "":
+                        print("Negative Object Query:", negative_object_query)
+                        # 1- similarity for non-similarity
+                        negative_object_query_similarity = clip_segmeter.compute_similarity_one(negative_object_query, level="object")
+                        dropped_idx = negative_object_query_similarity > obj_negative_similarity_slider.value
+                        print("dropped_idx:", dropped_idx.shape)
+                        selected_idx = selected_idx & ~dropped_idx
 
-                selected_idx = edit_utils.cluster_instance(gaussians.get_xyz.cpu().numpy(), selected_idx, eps=0.015, min_samples=10)
+                    selected_idx = edit_utils.cluster_instance(gaussians.get_xyz.cpu().numpy(), selected_idx, eps=0.015, min_samples=10)
 
-                # expand the area for clearly separating objects
-                # selected_idx = edit_utils.flood_fill(gaussians.get_xyz.cpu().numpy(),selected_idx, max_dist=0.01)
-                
-                # convex hull for better visualization but not work for non-convex objects
-                # selected_idx = edit_utils.get_convex_hull(gaussians.get_xyz.cpu().numpy(), selected_idx)
+                    # expand the area for clearly separating objects
+                    # selected_idx = edit_utils.flood_fill(gaussians.get_xyz.cpu().numpy(),selected_idx, max_dist=0.01)
 
-                if part_query != "":
-                    print("Part Query:", part_query)
-                    part_obj_similarity = clip_segmeter.compute_similarity_one(part_query, level="part")
-                    # normalize the similarity
-                    part_obj_similarity_selected = part_obj_similarity[selected_idx]
-                    part_obj_similarity = (part_obj_similarity - np.min(part_obj_similarity_selected)) / (np.max(part_obj_similarity_selected) - np.min(part_obj_similarity_selected))
+                    # convex hull for better visualization but not work for non-convex objects
+                    # selected_idx = edit_utils.get_convex_hull(gaussians.get_xyz.cpu().numpy(), selected_idx)
 
-                    print("Part similarity:", part_obj_similarity)
+                    if part_query != "":
+                        print("Part Query:", part_query)
+                        part_obj_similarity = clip_segmeter.compute_similarity_one(part_query, level="part")
+                        # normalize the similarity
+                        part_obj_similarity_selected = part_obj_similarity[selected_idx]
+                        part_obj_similarity = (part_obj_similarity - np.min(part_obj_similarity_selected)) / (np.max(part_obj_similarity_selected) - np.min(part_obj_similarity_selected))
 
-                    selected_idx = selected_idx & (part_obj_similarity > part_similarity_slider.value)
+                        print("Part similarity:", part_obj_similarity)
 
-                    selected_idx = edit_utils.cluster_instance(gaussians.get_xyz.cpu().numpy(), selected_idx, eps=0.02, min_samples=15)
+                        selected_idx = selected_idx & (part_obj_similarity > part_similarity_slider.value)
 
-                # expansion for collision avoidance
-                selected_idx_expanded = edit_utils.flood_fill(gaussians.get_xyz.cpu().numpy(), selected_idx, max_dist=0.1)
+                        selected_idx = edit_utils.cluster_instance(gaussians.get_xyz.cpu().numpy(), selected_idx, eps=0.02, min_samples=15)
 
-                nonlocal gaussians_fg, gaussians_fg_expanded, gaussians_bg, pcd_gaussians_selected
+                    # expansion for collision avoidance
+                    selected_idx_expanded = edit_utils.flood_fill(gaussians.get_xyz.cpu().numpy(), selected_idx, max_dist=0.1)
 
-                gaussians_fg = edit_utils.select_gaussians(gaussians, selected_idx)
-                gaussians_fg_expanded = edit_utils.select_gaussians(gaussians, selected_idx_expanded)
-                gaussians_bg = edit_utils.select_gaussians(gaussians, ~selected_idx)
+                    nonlocal gaussians_fg, gaussians_fg_expanded, gaussians_bg, pcd_gaussians_selected
+                    nonlocal local_object_grasp_poses, local_object_grasp_poses_visual, local_object_grasp_scores
 
-                pcd_gaussians_selected = o3d.geometry.PointCloud()
-                gaussians_fg_xyz = gaussians_fg.get_xyz.cpu().numpy()
-                pcd_gaussians_selected.points = o3d.utility.Vector3dVector(gaussians_fg_xyz)
-                pcd_gaussians_selected.transform(world2base)
+                    # clear previous grasps
+                    for i in range(len(local_object_grasp_poses_visual)):
+                        server.add_frame(name=f'/grasps_{i}', wxyz=tf.SO3.from_matrix(local_object_grasp_poses_visual[i][:3, :3]).wxyz, position=local_object_grasp_poses_visual[i][:3, 3], show_axes=False, visible=False)
+                    local_object_grasp_poses = []
+                    local_object_grasp_poses_visual = []
+                    local_object_grasp_scores = []
 
-                server.add_point_cloud(
-                    "pcd_fg_gaussians",
-                    points=np.asarray(pcd_gaussians_selected.points),
-                    # red
-                    colors= np.array([[255, 0, 0] for _ in range(gaussians_fg_xyz.shape[0])]),
-                    point_size=0.005,
-                    position=(0, 0, 0)
-                )
+                    gaussians_fg = edit_utils.select_gaussians(gaussians, selected_idx)
+                    gaussians_fg_expanded = edit_utils.select_gaussians(gaussians, selected_idx_expanded)
+                    gaussians_bg = edit_utils.select_gaussians(gaussians, ~selected_idx)
+
+                    pcd_gaussians_selected = o3d.geometry.PointCloud()
+                    gaussians_fg_xyz = gaussians_fg.get_xyz.cpu().numpy()
+                    pcd_gaussians_selected.points = o3d.utility.Vector3dVector(gaussians_fg_xyz)
+                    pcd_gaussians_selected.transform(world2base)
+
+                    server.add_point_cloud(
+                        "pcd_fg_gaussians",
+                        points=np.asarray(pcd_gaussians_selected.points),
+                        # red
+                        colors= np.array([[255, 0, 0] for _ in range(gaussians_fg_xyz.shape[0])]),
+                        point_size=0.005,
+                        position=(0, 0, 0)
+                    )
+            except Exception:
+                traceback.print_exc()
 
     # generate grasps with all the gaussians   
     with server.add_gui_folder("Global Grasping") as folder:
@@ -336,91 +432,89 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
 
         @global_grasp_button.on_click
         def _(_) -> None:
-            print("Generating global grasps")
-            # create dir to save point cloud
-            os.makedirs(os.path.join(dataset.model_path, "point_cloud_for_grasp"), exist_ok=True)
-            
-            with torch.no_grad():
-                # save global grasps point cloud
-                object_gaussians = copy.deepcopy(gaussians)
-                object_gaussians = edit_utils.rotate_gaussians(object_gaussians, world2base[:3, :3])
-                object_gaussians = edit_utils.translate_gaussians(object_gaussians, world2base[:3, 3])
-                object_gaussians = edit_utils.crop_gaussians_with_bbox(object_gaussians, x_min, x_max, y_min, y_max, z_min, z_max)
+            import traceback
+            try:
+                print("Generating global grasps")
+                # create dir to save point cloud
+                os.makedirs(os.path.join(dataset.model_path, "point_cloud_for_grasp"), exist_ok=True)
 
-            saved_path = os.path.join(dataset.model_path, "point_cloud_for_grasp/global_object_gaussians.ply")
+                with torch.no_grad():
+                    # save global grasps point cloud
+                    object_gaussians = copy.deepcopy(gaussians)
+                    object_gaussians = edit_utils.rotate_gaussians(object_gaussians, world2base[:3, :3])
+                    object_gaussians = edit_utils.translate_gaussians(object_gaussians, world2base[:3, 3])
+                    object_gaussians = edit_utils.crop_gaussians_with_bbox(object_gaussians, x_min, x_max, y_min, y_max, z_min, z_max)
 
-            # # check if the file exists
-            # if not os.path.exists(saved_path):
-            # print(saved_path)
+                saved_path = os.path.join(dataset.model_path, "point_cloud_for_grasp/global_object_gaussians.ply")
+                object_gaussians.save_ply(saved_path)
 
-            object_gaussians.save_ply(saved_path)
+                # generate global grasps
+                pose_matrices, scores = grasping_utils.sample_grasps(saved_path, if_global=True)
 
-            # generate global grasps
-            pose_matrices, scores = grasping_utils.sample_grasps(saved_path, if_global=True)
+                print("Global grasps generated")
 
-            print("Global grasps generated")
+                nonlocal global_grasp_poses, global_grasp_poses_visual, global_grasp_scores
 
-            nonlocal global_grasp_poses, global_grasp_poses_visual, global_grasp_scores
+                # Print the parsed data and corresponding pose matrices
+                for i, (score, pose) in enumerate(zip(scores, pose_matrices)):
 
-            # Print the parsed data and corresponding pose matrices
-            for i, (score, pose) in enumerate(zip(scores, pose_matrices)):
+                    # filter grasp out of the table top
+                    eps = 0.02 # clear the outlier
+                    if pose[0, 3] < x_min + eps or pose[0, 3] > x_max - eps or pose[1, 3] < y_min + eps or pose[1, 3] > y_max - eps or pose[2, 3] < z_min + eps or pose[2, 3] > z_max - eps:
+                        continue
 
-                # filter grasp out of the table top
-                eps = 0.02 # clear the outlier
-                if pose[0, 3] < x_min + eps or pose[0, 3] > x_max - eps or pose[1, 3] < y_min + eps or pose[1, 3] > y_max - eps or pose[2, 3] < z_min + eps or pose[2, 3] > z_max - eps:
-                    continue
+                    # make the rotation easier fot the last joint(can be deleted, the pose would be strange)
+                    Ry = SO3.Ry(np.pi/2).data[0]
+                    grasp_pose = pose.copy()
+                    grasp_pose[:3, :3] = pose[:3, :3] @ Ry
+                    x_axis_vector = grasp_pose[:3, 0]
+                    world_x_axis = np.array([1, 0, 0])
+                    dot_product = np.dot(x_axis_vector, world_x_axis)
+                    # If the dot product is negative, the gripper is pointing in the opposite direction
+                    if dot_product < 0:
+                        Rz = SO3.Rz(np.pi).data[0]
+                        grasp_pose[:3, :3] = grasp_pose[:3, :3] @ Rz
 
-                # make the rotation easier fot the last joint(can be deleted, the pose would be strange)
-                Ry = SO3.Ry(np.pi/2).data[0]
-                grasp_pose = pose.copy()
-                grasp_pose[:3, :3] = pose[:3, :3] @ Ry
-                x_axis_vector = grasp_pose[:3, 0]
-                world_x_axis = np.array([1, 0, 0])
-                dot_product = np.dot(x_axis_vector, world_x_axis)
-                # If the dot product is negative, the gripper is pointing in the opposite direction
-                if dot_product < 0:
-                    Rz = SO3.Rz(np.pi).data[0]
-                    grasp_pose[:3, :3] = grasp_pose[:3, :3] @ Rz
+                    # hardcode for better grasping(collision avoidance for tabletop)
+                    z_axis_vector = -grasp_pose[:3, 2]
+                    world_z_axis = np.array([0, 0, 1])
+                    z_vector_norm = np.linalg.norm(z_axis_vector)
+                    world_z_vector_norm = np.linalg.norm(world_z_axis)
+                    dot_product = np.dot(z_axis_vector, world_z_axis)
+                    angle = np.arccos(dot_product / (z_vector_norm * world_z_vector_norm))
+                    if angle > np.pi / 4:
+                        continue
 
-                # hardcode for better grasping(collision avoidance for tabletop)
-                z_axis_vector = -grasp_pose[:3, 2]
-                world_z_axis = np.array([0, 0, 1])
-                z_vector_norm = np.linalg.norm(z_axis_vector)
-                world_z_vector_norm = np.linalg.norm(world_z_axis)
-                dot_product = np.dot(z_axis_vector, world_z_axis)
-                angle = np.arccos(dot_product / (z_vector_norm * world_z_vector_norm))
-                if angle > np.pi / 4:
-                    continue
+                    global_grasp_poses_visual.append(pose.copy())
+                    global_grasp_poses.append(grasp_pose)
+                    global_grasp_scores.append(score)
 
-                global_grasp_poses_visual.append(pose.copy())
-                global_grasp_poses.append(grasp_pose)
-                global_grasp_scores.append(score)
+                # normalize the scores
+                print("{} grasps generated".format(len(global_grasp_poses)))
 
-            # normalize the scores
-            print("{} grasps generated".format(len(global_grasp_poses)))
+                global_grasp_scores_visual = np.array(global_grasp_scores)
+                global_grasp_scores_visual = (global_grasp_scores_visual - np.min(global_grasp_scores_visual)) / (np.max(global_grasp_scores_visual) - np.min(global_grasp_scores_visual))
 
-            global_grasp_scores_visual = np.array(global_grasp_scores)
-            global_grasp_scores_visual = (global_grasp_scores_visual - np.min(global_grasp_scores_visual)) / (np.max(global_grasp_scores_visual) - np.min(global_grasp_scores_visual))
+                for ind, pose in enumerate(global_grasp_poses_visual):
 
-            for ind, pose in enumerate(global_grasp_poses_visual):
+                    grasp = global_grasp_poses_visual[ind]
+                    rotation_matrix = grasp[:3, :3]
+                    translation = grasp[:3, 3]
 
-                grasp = global_grasp_poses_visual[ind]
-                rotation_matrix = grasp[:3, :3]
-                translation = grasp[:3, 3]
-
-                frame_handle = server.add_frame(
-                    name=f'/grasps_{ind}',
-                    wxyz=tf.SO3.from_matrix(rotation_matrix).wxyz,
-                    position=translation,
-                    show_axes=False
-                )
-                grasp_handle = server.add_mesh(
-                    name=f'/grasps_{ind}/mesh',
-                    vertices=np.asarray(default_grasp.vertices),
-                    faces=np.asarray(default_grasp.triangles),
-                    # color=np.array([1.0, 0.0, 0.0]),
-                    color = np.array([global_grasp_scores_visual[ind], 0.0, 1.0 - global_grasp_scores_visual[ind]]),
-                )
+                    frame_handle = server.add_frame(
+                        name=f'/grasps_{ind}',
+                        wxyz=tf.SO3.from_matrix(rotation_matrix).wxyz,
+                        position=translation,
+                        show_axes=False
+                    )
+                    grasp_handle = server.add_mesh(
+                        name=f'/grasps_{ind}/mesh',
+                        vertices=np.asarray(default_grasp.vertices),
+                        faces=np.asarray(default_grasp.triangles),
+                        color = np.array([global_grasp_scores_visual[ind], 0.0, 1.0 - global_grasp_scores_visual[ind]]),
+                    )
+            except Exception:
+                traceback.print_exc()
 
         # Select grasps with gaussian splatting
         filter_with_gaussian_button = server.add_gui_button("Filter with Gaussian")
@@ -506,10 +600,12 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
             print("Tep", Tep)
             print("joint angles", sol)
 
-
-
             for i, angle in enumerate(sol):
                 gui_joints[i].value = angle
+
+            save_path = os.path.join(dataset.model_path, "best_grasp_pose.npy")
+            np.save(save_path, grasp)
+            print(f"Best grasp pose saved to {save_path}")
 
             plan_utils.grasp_object(grasp)
 
@@ -537,19 +633,56 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
             global_grasp_poses_visual = []
             global_grasp_scores = []
 
-    # only sample grasps for the selected object
-    with server.add_gui_folder("Object Grasping") as folder:
-        # Create grasp button.
-        local_grasp_button = server.add_gui_button("Generate Object Grasps")
+    def _select_best_grasp():
+        if len(local_object_grasp_poses) == 0:
+            print("No grasps available")
+            return
 
-        @local_grasp_button.on_click
-        def _(_) -> None:
+        max_score = np.max(local_object_grasp_scores)
+        grasp_number = local_object_grasp_scores.index(max_score)
+        grasp = local_object_grasp_poses[grasp_number]
+        print(f"Grasp {grasp_number} selected")
+
+        roll, pitch, yaw = euler.mat2euler(grasp[:3, :3])
+        Tep = SE3.Trans(grasp[:3, 3]) * SE3.RPY([roll, pitch, yaw])
+
+        sol, success, iterations, searches, residual = virtual_robot.ik_NR(Tep)
+
+        if not success:
+            print("No IK solution found")
+            return
+
+        print("Tep", Tep)
+        print("joint angles", sol)
+
+        for i, angle in enumerate(sol):
+            gui_joints[i].value = angle
+
+        for i, pose_vis in enumerate(local_object_grasp_poses_visual):
+            visible = (i == grasp_number)
+            server.add_frame(
+                name=f'/grasps_{i}',
+                wxyz=tf.SO3.from_matrix(pose_vis[:3, :3]).wxyz,
+                position=pose_vis[:3, 3],
+                show_axes=visible,
+                axes_length=0.05,
+                axes_radius=0.003,
+                visible=visible,
+            )
+
+        save_path = os.path.join(dataset.model_path, "best_grasp_pose.npy")
+        np.save(save_path, grasp)
+        print(f"Best grasp pose saved to {save_path}")
+
+        plan_utils.grasp_object(grasp)
+
+    def _generate_object_grasps():
+        import traceback
+        try:
             print("Generating object grasps")
-            # create dir to save point cloud
             os.makedirs(os.path.join(dataset.model_path, "point_cloud_for_grasp"), exist_ok=True)
-            
+
             with torch.no_grad():
-                # save local grasps point cloud
                 object_gaussians = copy.deepcopy(gaussians_fg_expanded)
                 object_gaussians = edit_utils.rotate_gaussians(object_gaussians, world2base[:3, :3])
                 object_gaussians = edit_utils.translate_gaussians(object_gaussians, world2base[:3, 3])
@@ -557,24 +690,21 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
             saved_path = os.path.join(dataset.model_path, "point_cloud_for_grasp/local_object_gaussians.ply")
             object_gaussians.save_ply(saved_path)
 
-            # generate local grasps
             pose_matrices, scores = grasping_utils.sample_grasps(saved_path, if_global=False)
 
             print("Object grasps generated")
 
             nonlocal local_object_grasp_poses, local_object_grasp_poses_visual, local_object_grasp_scores
 
-            # Print the parsed data and corresponding pose matrices
             for i, (score, pose) in enumerate(zip(scores, pose_matrices)):
 
-                # make the rotation easier fot the last joint(can be deleted, the pose would be strange)
+                # make the rotation easier for the last joint
                 Ry = SO3.Ry(np.pi/2).data[0]
                 grasp_pose = pose.copy()
                 grasp_pose[:3, :3] = pose[:3, :3] @ Ry
                 x_axis_vector = grasp_pose[:3, 0]
                 world_x_axis = np.array([1, 0, 0])
                 dot_product = np.dot(x_axis_vector, world_x_axis)
-                # If the dot product is negative, the gripper is pointing in the opposite direction
                 if dot_product < 0:
                     Rz = SO3.Rz(np.pi).data[0]
                     grasp_pose[:3, :3] = grasp_pose[:3, :3] @ Rz
@@ -592,84 +722,59 @@ def main(dataset : ModelParams, iteration : int, opt) -> None:
                 rotation_matrix = grasp_pose[:3, :3]
                 translation = pose[:3, 3]
 
-                rotation_matrix_vis = pose[:3, :3]
-                translation_vis = pose[:3, 3]
+                translation_nearer = translation + 0.05 * rotation_matrix[:, 2]
 
-                translation_nearer = translation + 0.05 * rotation_matrix[:, 2] # move the grasp closer to the object
-
-                # calculate the minimum distance between the grasp and the object
                 min_distance = np.min(np.linalg.norm(np.asarray(pcd_gaussians_selected.points) - translation_nearer, axis=1))
-                
+
                 print("min_distance", min_distance)
                 if min_distance < 0.02:
                     local_object_grasp_poses_visual.append(pose.copy())
                     local_object_grasp_poses.append(grasp_pose)
                     local_object_grasp_scores.append(score)
 
-            # # only keep 20 highest scores
-            # if len(local_object_grasp_poses) > 20:
-            #     idx = np.argsort(local_object_grasp_scores)[-20:]
-            #     local_object_grasp_poses = [local_object_grasp_poses[i] for i in idx]
-            #     local_object_grasp_poses_visual = [local_object_grasp_poses_visual[i] for i in idx]
-            #     local_object_grasp_scores = [local_object_grasp_scores[i] for i in idx]
-
-            # normalize the scores
             print("{} grasps generated".format(len(local_object_grasp_poses)))
 
             local_object_grasp_scores_visual = np.array(local_object_grasp_scores)
             local_object_grasp_scores_visual = (local_object_grasp_scores_visual - np.min(local_object_grasp_scores_visual)) / (np.max(local_object_grasp_scores_visual) - np.min(local_object_grasp_scores_visual))
 
-            for ind, pose in enumerate(local_object_grasp_poses_visual):
-
+            for ind in range(len(local_object_grasp_poses_visual)):
                 grasp = local_object_grasp_poses_visual[ind]
                 rotation_matrix = grasp[:3, :3]
                 translation = grasp[:3, 3]
 
-                frame_handle = server.add_frame(
+                server.add_frame(
                     name=f'/grasps_{ind}',
                     wxyz=tf.SO3.from_matrix(rotation_matrix).wxyz,
                     position=translation,
                     show_axes=False
                 )
-                grasp_handle = server.add_mesh(
+                server.add_mesh(
                     name=f'/grasps_{ind}/mesh',
                     vertices=np.asarray(default_grasp.vertices),
                     faces=np.asarray(default_grasp.triangles),
-                    # color=np.array([1.0, 0.0, 0.0]),
-                    color = np.array([local_object_grasp_scores_visual[ind], 0.0, 1.0 - local_object_grasp_scores_visual[ind]]),
+                    color=np.array([local_object_grasp_scores_visual[ind], 0.0, 1.0 - local_object_grasp_scores_visual[ind]]),
                 )
-        
+        except Exception:
+            traceback.print_exc()
+
+    # only sample grasps for the selected object
+    with server.add_gui_folder("Object Grasping") as folder:
+        # Create grasp button.
+        local_grasp_button = server.add_gui_button("Generate Object Grasps")
+
+        @local_grasp_button.on_click
+        def _(_) -> None:
+            _generate_object_grasps()
+
         # Choose with score
         select_local_grasp_score_button = server.add_gui_button("Grasp with score")
 
         @select_local_grasp_score_button.on_click
         def _(_) -> None:
             if len(local_object_grasp_poses) == 0:
-                print("Please filter grasps first")
+                print("Please generate grasps first")
                 return
-            
-            # select the grasp with the highest score
-            max_score = np.max(local_object_grasp_scores)
-            grasp_number = local_object_grasp_scores.index(max_score)
-            grasp = local_object_grasp_poses[grasp_number]
-            print(f"Grasp {grasp_number} selected")
-
-            roll, pitch, yaw = euler.mat2euler(grasp[:3, :3])
-            Tep = SE3.Trans(grasp[:3, 3]) * SE3.RPY([roll, pitch, yaw])
-
-            sol, success, iterations, searches, residual = virtual_robot.ik_NR(Tep)
-
-            if not success:
-                print("No solution found")
-                return
-            
-            print("Tep", Tep)
-            print("joint angles", sol)
-
-            for i, angle in enumerate(sol):
-                gui_joints[i].value = angle
-        
-            plan_utils.grasp_object(grasp)
+            _select_best_grasp()
 
         # Clear local grasps
         clear_local_grasp_button = server.add_gui_button("Clear Local Grasps")

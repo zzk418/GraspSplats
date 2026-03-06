@@ -2,7 +2,11 @@
 Compute world2base transform for a scene with no robot calibration.
 
 Strategy:
-  1. Rotation: camera look direction -> robot Z (up), point cloud long axis -> robot Y
+  1. Rotation:
+     - robot Z (up): estimated from point cloud normal (PC2, least variance axis),
+       sign corrected so cameras are above the table (camera centers have positive Z).
+     - robot Y (long edge): PC0 of point cloud projected onto the table plane.
+     - robot X: cross(Y, Z)
   2. Scale: COLMAP scene long-edge -> real object size (meters)
   3. Translation: scene center -> target_pos in robot base frame
 
@@ -11,7 +15,7 @@ Requires: colmap images.bin in same sparse/0 folder as points3D.ply
 Usage:
     python scripts/compute_alignment.py \
         --ply scene_data/tissue_data/colmap/sparse/0/points3D.ply \
-        --real_size 0.05 \
+        --real_size 1 \
         --target_pos 0.5 0.0 0.05 \
         --out outputs/tissue_data/world2base.npy
 """
@@ -35,21 +39,33 @@ def compute_world2base(ply_path: str, real_size: float, target_pos: np.ndarray) 
     print(f"COLMAP span: {span:.4f} units  |  scale: {scale:.6f} m/unit")
 
     # --- rotation ---
-    # robot Z (up) = average camera look direction (cameras look down at table)
-    sparse_dir = ply_path.replace("points3D.ply", "")
-    extrinsics = read_extrinsics_binary(sparse_dir + "images.bin")
-    look_dirs = [qvec2rotmat(v.qvec)[2] for v in extrinsics.values()]
-    scene_up = np.array(look_dirs).mean(axis=0)
-    scene_up /= np.linalg.norm(scene_up)
-
-    # robot Y (long edge) = PC0 of point cloud, orthogonalized against up
+    # SVD of centered point cloud: rows of Vt are principal axes
+    # PC0 = longest axis (table plane), PC2 = normal to table (up/down)
     centered = pts - center
     _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+
+    scene_up = Vt[2]  # least-variance axis = table normal
+
+    # Sign correction: camera centers should be on the positive-Z side of the table.
+    # Average camera center in COLMAP coords:
+    sparse_dir = ply_path.replace("points3D.ply", "")
+    extrinsics = read_extrinsics_binary(sparse_dir + "images.bin")
+    cam_centers = []
+    for v in extrinsics.values():
+        R_c = qvec2rotmat(v.qvec)
+        t_c = np.array(v.tvec)
+        cam_centers.append(-R_c.T @ t_c)
+    mean_cam = np.mean(cam_centers, axis=0) - center
+    if np.dot(scene_up, mean_cam) < 0:
+        scene_up = -scene_up
+    print(f"Table normal (scene up): {scene_up}")
+
+    # robot Y (long edge) = PC0 projected onto table plane
     scene_long = Vt[0]
     scene_long = scene_long - np.dot(scene_long, scene_up) * scene_up
     scene_long /= np.linalg.norm(scene_long)
 
-    # robot X = cross(robot Y, robot Z), ensure right-handed
+    # robot X = cross(Y, Z), right-handed
     scene_x = np.cross(scene_long, scene_up)
     scene_x /= np.linalg.norm(scene_x)
 
