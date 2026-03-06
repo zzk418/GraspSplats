@@ -65,11 +65,13 @@ def viser_to_minicam(client: viser.ClientHandle, width: int, height: int,
     R_wc = R_wc_cv @ flip                        # world(COLMAP)←camera
     pos  = np.asarray(client.camera.position, dtype=np.float64)
 
+    # getWorld2View2(R, t) stores R^T internally, so pass R_wc (not R_cw)
+    # t_cw = -R_cw @ pos = -(R_wc^T) @ pos
     R_cw = R_wc.T
     t_cw = (-R_cw @ pos).astype(np.float32)
 
     world_view = torch.tensor(
-        getWorld2View2(R_cw.astype(np.float32), t_cw)
+        getWorld2View2(R_wc.astype(np.float32), t_cw)
     ).transpose(0, 1).cuda()
 
     fovy = float(client.camera.fov)
@@ -400,7 +402,12 @@ def main(dataset: ModelParams, iteration: int, opt) -> None:
     xyz_world = gaussians.get_xyz.detach().cpu().numpy()
     xyz_base  = (world2base[:3, :3] @ xyz_world.T).T + world2base[:3, 3]
 
-    # URDF root in COLMAP frame: base origin = base2colmap @ [0,0,0,1]
+    # URDF root in COLMAP frame.
+    # base2colmap has scale ~12x (COLMAP units per meter), so:
+    #   position = base2colmap @ [0,0,0,1]  (robot base origin in COLMAP)
+    #   rotation = pure rotation part of base2colmap
+    #   urdf scale = colmap_per_meter so URDF meters match COLMAP units
+    colmap_per_meter = np.linalg.norm(base2colmap[:3, :3], axis=0).mean()
     base_origin_colmap = base2colmap[:3, 3]
     R_b2c_raw = base2colmap[:3, :3]
     R_b2c_pure = R_b2c_raw / np.linalg.norm(R_b2c_raw, axis=0, keepdims=True)
@@ -456,13 +463,16 @@ def main(dataset: ModelParams, iteration: int, opt) -> None:
 
     with server.add_gui_folder("Robot"):
         gui_joints: List[viser.GuiInputHandle] = []
-        # Place robot base at the COLMAP-frame position of the robot base origin
+        # Place robot base in COLMAP frame with correct scale.
+        # ViserUrdf has no built-in parent frame support, so we use scale= to
+        # convert URDF meters → COLMAP units, and set the root frame manually.
         server.add_frame("/panda_base",
                          wxyz=tuple(base_R_colmap.tolist()),
                          position=tuple(base_origin_colmap.tolist()),
                          show_axes=False)
         urdf = ViserUrdf(server, urdf_path=Path("./urdf/panda_newgripper.urdf"),
-                         root_node_name="/panda_base")
+                         root_node_name="/panda_base",
+                         scale=float(colmap_per_meter))
         for jname, (lo, hi) in urdf.get_actuated_joint_limits().items():
             lo = lo if lo is not None else -np.pi
             hi = hi if hi is not None else np.pi
